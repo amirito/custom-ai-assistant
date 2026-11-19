@@ -6,12 +6,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pypdf import PdfReader
 
-# ایمپورت کردن کلاس Agent از فایل قبلی خودت
 from my_ai import Agent
+import database as db
 
 app = FastAPI(title="Amir AI API")
 
-# فعال‌سازی CORS برای اینکه React (روی پورت 5173) اجازه صحبت با FastAPI (روی پورت 8000) را داشته باشد
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,18 +22,18 @@ app.add_middleware(
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# ساخت نمونه ایجنت
+# ساخت جداول دیتابیس در لحظه شروع
+db.init_db()
+
 agent = Agent(
     model="qwen2.5:7b",
     system_prompt=(
-        "You are Amir AI, a helpful, intelligent local assistant. "
-        "You can read uploaded PDF files and search files on the system when asked. "
-        "Respond in the same language the user uses (e.g., Persian or English). "
-        "For normal chat, answer directly without using tools."
+        "You are Amir AI, a helpful and honest local assistant. "
+        "If you do not have accurate knowledge about a specific cultural topic, recipe, or fact, "
+        "honestly admit that you don't know instead of guessing or making up information. "
+        "Use tools only when the user asks to read PDFs or search files."
     ),
 )
-
-# --- ثبت ابزارها روی ایجنت ---
 
 @agent.tool
 def read_pdf(
@@ -57,7 +56,7 @@ def read_pdf(
 
     full_text = "\n\n".join(extracted_text)
     if len(full_text) > 6000:
-        full_text = full_text[:6000] + "\n... [Content truncated due to length]"
+        full_text = full_text[:6000] + "\n... [Text truncated due to length]"
 
     return {
         "total_pages": total_pages,
@@ -88,11 +87,50 @@ def search_files(
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: str | None = None
+    display_message: str | None = None
+    file_name: str | None = None
 
 @app.post("/chat")
 def chat_endpoint(req: ChatRequest):
+    session_id = req.session_id
+    user_display = req.display_message or req.message
+
+    # اگر چت جدید است، یک سشن در SQLite می‌سازیم
+    if not session_id:
+        session_id = db.create_session(user_display)
+        agent.messages.clear()
+    else:
+        # بازیابی تاریخچه پیام‌های قبلی همین چت از دیتابیس برای حفظ کانتکست مدل
+        past_messages = db.get_session_messages(session_id)
+        agent.messages = [
+            {"role": m["role"], "content": m["content"]} for m in past_messages
+        ]
+
+    # ذخیره پیام کاربر در دیتابیس
+    db.save_message(session_id, "user", user_display, req.file_name)
+
+    # دریافت پاسخ از ایجنت
     reply = agent.chat(req.message)
-    return {"reply": reply}
+
+    # ذخیره پاسخ مدل در دیتابیس
+    db.save_message(session_id, "assistant", reply)
+
+    return {"reply": reply, "session_id": session_id}
+
+@app.get("/sessions")
+def list_sessions():
+    return {"sessions": db.get_all_sessions()}
+
+@app.get("/sessions/{session_id}")
+def get_session(session_id: str):
+    messages = db.get_session_messages(session_id)
+    return {"messages": messages}
+
+@app.delete("/sessions/{session_id}")
+def remove_session(session_id: str):
+    db.delete_session(session_id)
+    return {"status": "deleted"}
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -102,10 +140,5 @@ async def upload_file(file: UploadFile = File(...)):
     return {
         "filename": file.filename,
         "file_path": file_path,
-        "message": "File uploaded successfully"
+        "message": "File uploaded successfully",
     }
-
-@app.post("/reset")
-def reset_chat():
-    agent.messages.clear()
-    return {"status": "Conversation history cleared"}

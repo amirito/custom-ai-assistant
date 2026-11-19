@@ -1,6 +1,6 @@
 # 🤖 Amir AI — Local Full-Stack AI Agent
 
-A privacy-first, locally hosted AI assistant built from scratch in Python and React. Powered by **Ollama (`qwen2.5:7b`)**, it features a custom ReAct-style tool-calling engine, a **FastAPI** backend, and a modern **React + Tailwind CSS** web interface with automatic RTL/LTR text alignment and PDF document analysis.
+A privacy-first, locally hosted AI assistant built from scratch in Python and React. Powered by **Ollama (`qwen2.5:7b`)**, it features a custom ReAct-style tool-calling engine, persistent **SQLite** conversation memory, a **FastAPI** backend, and a modern **React + Tailwind CSS** web interface with automatic RTL/LTR text alignment and PDF document analysis.
 
 ---
 
@@ -9,16 +9,19 @@ A privacy-first, locally hosted AI assistant built from scratch in Python and Re
 - **Custom Tool-Calling Framework (`my_ai.py`):**
   - Lightweight, zero-bloat ReAct agent loop with step limits (`max_steps`) to prevent infinite loops.
   - Automatic Python type-hint (`Annotated`, `get_origin`, `get_args`, `inspect`) to JSON Schema translation using `@agent.tool`.
+- **Persistent SQLite Memory (`database.py`):**
+  - Automatically saves all chat sessions and message histories locally in SQLite (`chat_history.db`).
+  - Supports switching between past sessions, restoring LLM conversation context, and deleting old chats from the sidebar.
 - **Built-in Local Tools:**
   - `read_pdf`: Extracts and summarizes text from uploaded PDF documents.
   - `search_files`: Searches directories and subfolders for matching files on the local filesystem.
 - **FastAPI Backend (`server.py`):**
-  - Clean REST endpoints (`/chat`, `/upload`, `/reset`) with Pydantic request validation and CORS support.
+  - Clean REST endpoints (`/chat`, `/sessions`, `/upload`) with Pydantic request validation and CORS support.
 - **Modern React UI (`frontend/`):**
-  - Built with React, Vite, and Tailwind CSS.
+  - Built with React, Vite, and Tailwind CSS with a collapsible session sidebar and prompt starters.
   - Drag-and-drop & click-to-attach file uploads.
   - Smart automatic text direction detection (`RTL` for Persian/Arabic, `LTR` for English) per message bubble and input field.
-  - Full Markdown rendering for structured responses and code blocks.
+  - Full Markdown rendering with custom code blocks and one-click copy.
 
 ---
 
@@ -26,13 +29,15 @@ A privacy-first, locally hosted AI assistant built from scratch in Python and Re
 
 ```text
 ├── my_ai.py            # Core Agent & Tools schema introspection engine
+├── database.py         # SQLite database initialization and CRUD helpers
 ├── server.py           # FastAPI application, endpoints & tool definitions
 ├── requirements.txt    # Python dependencies
+├── chat_history.db     # Local SQLite database (auto-generated, gitignored)
 ├── uploads/            # Temporary storage for uploaded files (gitignored)
 └── frontend/           # React + Vite + Tailwind CSS web application
     ├── src/
-    │   ├── App.jsx     # Main chat UI & file upload logic
-    │   └── index.css   # Tailwind CSS setup
+    │   ├── App.jsx     # Main chat UI, session sidebar & file upload logic
+    │   └── index.css   # Tailwind CSS & custom scrollbar setup
     └── package.json
 ```
 
@@ -66,7 +71,7 @@ source venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Start the FastAPI server
+# Start the FastAPI server (automatically initializes chat_history.db)
 uvicorn server:app --reload --port 8000
 ```
 

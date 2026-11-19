@@ -17,6 +17,7 @@ import {
   FolderSearch,
   FileUp,
   MessageSquare,
+  Trash2,
 } from 'lucide-react';
 
 const API_URL = 'http://127.0.0.1:8000';
@@ -48,6 +49,8 @@ const SUGGESTED_PROMPTS = [
 ];
 
 export default function App() {
+  const [sessions, setSessions] = useState([]);
+  const [currentSessionId, setCurrentSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -61,17 +64,76 @@ export default function App() {
   const fileInputRef = useRef(null);
   const textareaRef = useRef(null);
 
+  // دریافت لیست تمام گفتگوهای ذخیره‌شده در SQLite هنگام لود صفحه
+  const fetchSessions = async () => {
+    try {
+      const res = await fetch(`${API_URL}/sessions`);
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(data.sessions || []);
+      }
+    } catch (err) {
+      console.error('Failed to load sessions:', err);
+    }
+  };
+
+  useEffect(() => {
+    fetchSessions();
+  }, []);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
 
-  // تنظیم خودکار ارتفاع کادر تایپ هنگام نوشتن چند خط
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 160)}px`;
     }
   }, [input]);
+
+  // باز کردن یک گفتگوی قدیمی از سایدبار
+  const loadSession = async (sessionId) => {
+    if (isLoading) return;
+    try {
+      const res = await fetch(`${API_URL}/sessions/${sessionId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setCurrentSessionId(sessionId);
+        setMessages(
+          data.messages.map((m) => ({
+            role: m.role,
+            content: m.content,
+            file: m.file_name,
+          }))
+        );
+        setAttachedFile(null);
+      }
+    } catch (err) {
+      console.error('Failed to load session messages:', err);
+    }
+  };
+
+  // حذف یک گفتگو از دیتابیس
+  const handleDeleteSession = async (e, sessionId) => {
+    e.stopPropagation();
+    try {
+      await fetch(`${API_URL}/sessions/${sessionId}`, { method: 'DELETE' });
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      if (currentSessionId === sessionId) {
+        startNewChat();
+      }
+    } catch (err) {
+      console.error('Failed to delete session:', err);
+    }
+  };
+
+  const startNewChat = () => {
+    setCurrentSessionId(null);
+    setMessages([]);
+    setAttachedFile(null);
+    setInput('');
+  };
 
   const handleCopy = (text, idx) => {
     navigator.clipboard.writeText(text);
@@ -101,18 +163,19 @@ export default function App() {
     }
   };
 
-  const handleSend = async (e, overrideText = null) => {
+  const handleSend = async (e) => {
     e?.preventDefault();
-    const textToSend = (overrideText !== null ? overrideText : input).trim();
+    const textToSend = input.trim();
     if ((!textToSend && !attachedFile) || isLoading) return;
 
     const currentFile = attachedFile;
+    const displayContent = textToSend || `Attached file: ${currentFile.filename}`;
 
     setMessages((prev) => [
       ...prev,
       {
         role: 'user',
-        content: textToSend || `Attached file: ${currentFile.filename}`,
+        content: displayContent,
         file: currentFile?.filename,
       },
     ]);
@@ -129,12 +192,23 @@ export default function App() {
       const res = await fetch(`${API_URL}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: promptForAgent }),
+        body: JSON.stringify({
+          message: promptForAgent,
+          session_id: currentSessionId,
+          display_message: displayContent,
+          file_name: currentFile?.filename || null,
+        }),
       });
       if (!res.ok) throw new Error('Chat request failed');
       const data = await res.json();
 
       setMessages((prev) => [...prev, { role: 'assistant', content: data.reply }]);
+
+      // اگر چت جدید بود، شناسه سشن جدید را ذخیره و سایدبار را آپدیت کن
+      if (!currentSessionId && data.session_id) {
+        setCurrentSessionId(data.session_id);
+        fetchSessions();
+      }
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -146,17 +220,6 @@ export default function App() {
       console.error(err);
     } finally {
       setIsLoading(false);
-    }
-  };
-
-  const handleReset = async () => {
-    try {
-      await fetch(`${API_URL}/reset`, { method: 'POST' });
-      setMessages([]);
-      setAttachedFile(null);
-      setInput('');
-    } catch (err) {
-      console.error(err);
     }
   };
 
@@ -178,7 +241,7 @@ export default function App() {
       onDragLeave={() => setIsDragging(false)}
       onDrop={handleDrop}
     >
-      {/* پوشش هنگام کشیدن فایل روی صفحه */}
+      {/* پوشش Drag & Drop */}
       {isDragging && (
         <div className="fixed inset-0 z-50 bg-zinc-950/85 backdrop-blur-md border-2 border-dashed border-violet-500/70 flex items-center justify-center">
           <div className="bg-zinc-900/90 border border-zinc-800 px-8 py-6 rounded-2xl text-center shadow-2xl">
@@ -189,7 +252,7 @@ export default function App() {
         </div>
       )}
 
-      {/* سایدبار مدرن (آماده برای لیست گفتگوهای SQLite در مرحله بعد) */}
+      {/* سایدبار مدرن با لیست گفتگوهای SQLite */}
       <aside
         className={`${
           sidebarOpen ? 'w-64' : 'w-0'
@@ -197,7 +260,7 @@ export default function App() {
       >
         <div className="p-3 flex items-center justify-between border-b border-zinc-800/60">
           <button
-            onClick={handleReset}
+            onClick={startNewChat}
             className="flex-1 flex items-center gap-2.5 px-3 py-2.5 rounded-xl bg-zinc-800/80 hover:bg-zinc-800 text-sm font-medium text-zinc-100 border border-zinc-700/60 transition cursor-pointer"
           >
             <Plus className="w-4 h-4 text-violet-400" />
@@ -205,18 +268,51 @@ export default function App() {
           </button>
         </div>
 
-        {/* جایگاه تاریخچه چت‌های SQLite */}
+        {/* لیست تاریخچه چت‌ها */}
         <div className="flex-1 overflow-y-auto p-3 space-y-1">
           <p className="px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
             Recent Sessions
           </p>
-          <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-zinc-800/50 text-zinc-300 text-xs border border-zinc-800">
-            <MessageSquare className="w-3.5 h-3.5 text-violet-400 shrink-0" />
-            <span className="truncate">Current Active Session</span>
-          </div>
-          <p className="px-2 pt-3 text-[11px] text-zinc-600 leading-relaxed">
-            SQLite persistent history will appear here in the next step.
-          </p>
+
+          {sessions.length === 0 ? (
+            <p className="px-2 pt-2 text-xs text-zinc-600">
+              No saved chats yet. Start a conversation!
+            </p>
+          ) : (
+            sessions.map((session) => {
+              const isActive = session.id === currentSessionId;
+              const titleDir = getTextDirection(session.title);
+              return (
+                <div
+                  key={session.id}
+                  onClick={() => loadSession(session.id)}
+                  className={`group flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-xs cursor-pointer transition ${
+                    isActive
+                      ? 'bg-zinc-800 text-zinc-100 border border-zinc-700/70'
+                      : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-200 border border-transparent'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <MessageSquare
+                      className={`w-3.5 h-3.5 shrink-0 ${
+                        isActive ? 'text-violet-400' : 'text-zinc-500'
+                      }`}
+                    />
+                    <span dir={titleDir} className="truncate">
+                      {session.title}
+                    </span>
+                  </div>
+                  <button
+                    onClick={(e) => handleDeleteSession(e, session.id)}
+                    className="opacity-0 group-hover:opacity-100 p-1 text-zinc-500 hover:text-red-400 rounded transition cursor-pointer"
+                    title="Delete chat"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              );
+            })
+          )}
         </div>
 
         {/* فوتر سایدبار */}
@@ -226,14 +322,14 @@ export default function App() {
           </div>
           <div className="min-w-0">
             <p className="text-xs font-medium text-zinc-200 truncate">Amir Local Agent</p>
-            <p className="text-[11px] text-zinc-500 truncate">macOS • Private & Offline</p>
+            <p className="text-[11px] text-zinc-500 truncate">SQLite Memory Enabled</p>
           </div>
         </div>
       </aside>
 
       {/* بخش اصلی چت */}
       <div className="flex-1 flex flex-col min-w-0 bg-gradient-to-b from-zinc-950 via-zinc-950 to-zinc-900/40">
-        {/* هدر مینیمال و شیشه‌ای */}
+        {/* هدر */}
         <header className="h-14 px-4 flex items-center justify-between border-b border-zinc-800/70 bg-zinc-950/70 backdrop-blur-md shrink-0">
           <div className="flex items-center gap-3">
             <button
@@ -261,10 +357,9 @@ export default function App() {
           </div>
         </header>
 
-        {/* ناحیه نمایش پیام‌ها یا صفحه خوش‌آمدگویی */}
+        {/* ناحیه نمایش پیام‌ها یا صفحه شروع */}
         <main className="flex-1 overflow-y-auto px-4">
           {messages.length === 0 ? (
-            /* صفحه شروع مدرن (Empty State) */
             <div className="h-full max-w-2xl mx-auto flex flex-col items-center justify-center text-center py-8">
               <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-violet-600 to-indigo-500 flex items-center justify-center shadow-xl shadow-violet-600/20 mb-5">
                 <Bot className="w-8 h-8 text-white" />
@@ -276,7 +371,6 @@ export default function App() {
                 Ask questions, search your local files, or drop a PDF document to analyze it completely offline.
               </p>
 
-              {/* کارت‌های پیشنهادی */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full mt-8 text-left">
                 {SUGGESTED_PROMPTS.map((item, i) => {
                   const Icon = item.icon;
@@ -301,7 +395,6 @@ export default function App() {
               </div>
             </div>
           ) : (
-            /* لیست پیام‌های گفتگو */
             <div className="max-w-3xl mx-auto py-6 space-y-6">
               {messages.map((msg, idx) => {
                 const isUser = msg.role === 'user';
@@ -312,7 +405,6 @@ export default function App() {
                     key={idx}
                     className={`flex gap-3.5 group ${isUser ? 'flex-row-reverse' : 'flex-row'}`}
                   >
-                    {/* آواتار */}
                     <div
                       className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 mt-0.5 shadow-sm ${
                         isUser
@@ -323,7 +415,6 @@ export default function App() {
                       {isUser ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
                     </div>
 
-                    {/* بدنه پیام */}
                     <div className={`flex flex-col max-w-[82%] ${isUser ? 'items-end' : 'items-start'}`}>
                       <div
                         dir={textDir}
@@ -379,7 +470,6 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* دکمه کپی زیر پیام دستیار */}
                       {!isUser && (
                         <button
                           onClick={() => handleCopy(msg.content, idx)}
@@ -403,7 +493,6 @@ export default function App() {
                 );
               })}
 
-              {/* انیمیشن در حال پردازش */}
               {isLoading && (
                 <div className="flex gap-3.5">
                   <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-violet-600 to-indigo-500 flex items-center justify-center shrink-0">
@@ -421,11 +510,10 @@ export default function App() {
           )}
         </main>
 
-        {/* کادر ورودی شناور و مدرن */}
+        {/* فوتر ورودی */}
         <footer className="p-4 pt-2 shrink-0">
           <div className="max-w-3xl mx-auto">
             <div className="bg-zinc-900/90 border border-zinc-800 focus-within:border-zinc-700 rounded-2xl p-2 shadow-xl transition">
-              {/* نمایش فایل پیوست شده */}
               {attachedFile && (
                 <div className="px-2 pt-1 pb-2">
                   <div className="inline-flex items-center gap-2 px-3 py-1.5 text-xs bg-violet-500/10 text-violet-300 border border-violet-500/20 rounded-xl">

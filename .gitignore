@@ -5,6 +5,10 @@ venv/
 .venv/
 env/
 
+# Local SQLite database
+*.db
+chat_history.db
+
 # Uploaded files
 uploads/*
 !uploads/.gitkeep
