@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+
+# Uploaded files
+uploads/*
+!uploads/.gitkeep
+
+# Frontend / Node
+frontend/node_modules/
+frontend/dist/
+
+# macOS
+.DS_Store
