@@ -214,6 +214,110 @@ class Agent:
             # self.messages.append({"role": "assistant", "content": assistant_message})
             # return assistant_message
 
+    def chat_stream(self, user_message: str, max_steps: int = 5):
+        self.messages.append({"role": "user", "content": user_message})
+        context_content = "\n\n".join(
+            f"<context name='{name}'>\n{func()}\n</context>" for name, func in self.contexts.items()
+        )
+        system_content = self.system_prompt
+        if context_content:
+            system_content += f"\n\nContext Information:\n{context_content}"
+
+        prefix: list[dict[str, Any]] = [
+            {"role": "system", "content": system_content}
+        ]
+
+        for step in range(max_steps):
+            api_kwargs = {
+                "model": self.model,
+                "messages": prefix + self.messages,
+                "temperature": 0.3,
+                "stream": True,
+            }
+
+            tool_schemas = self.tools.get_schemas()
+            if tool_schemas:
+                api_kwargs["tools"] = tool_schemas
+
+            url = f"{self.base_url}/chat/completions"
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+
+            with requests.post(url, headers=headers, json=api_kwargs, stream=True) as response:
+                response.raise_for_status()
+
+                full_content = ""
+                tool_calls_map: dict[int, dict[str, Any]] = {}
+
+                for raw_line in response.iter_lines():
+                    if not raw_line:
+                        continue
+                    line = raw_line.decode("utf-8")
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+
+                    chunk = json.loads(data_str)
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+
+                    delta = choices[0].get("delta", {})
+
+                    # ۱. اگر تکه متن آمد، همان لحظه بفرست بیرون
+                    if delta.get("content"):
+                        token = delta["content"]
+                        full_content += token
+                        yield {"type": "token", "content": token}
+
+                    # ۲. اگر تکه درخواست ابزار آمد، در دیکشنری سرهمش کن
+                    if delta.get("tool_calls"):
+                        for tc in delta["tool_calls"]:
+                            idx = tc.get("index", 0)
+                            if idx not in tool_calls_map:
+                                tool_calls_map[idx] = {
+                                    "id": tc.get("id") or f"call_{idx}",
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                }
+                            if tc.get("id"):
+                                tool_calls_map[idx]["id"] = tc["id"]
+                            fn = tc.get("function", {})
+                            if fn.get("name"):
+                                tool_calls_map[idx]["function"]["name"] += fn["name"]
+                            if fn.get("arguments"):
+                                tool_calls_map[idx]["function"]["arguments"] += fn["arguments"]
+
+                tool_calls = [tool_calls_map[i] for i in sorted(tool_calls_map.keys())]
+
+                assistant_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": full_content,
+                }
+                if tool_calls:
+                    assistant_msg["tool_calls"] = tool_calls
+
+                self.messages.append(assistant_msg)
+
+                # اگر ابزاری صدا زده نشده بود، کار تمام است
+                if not tool_calls:
+                    return
+
+                # اجرای ابزارها و اطلاع‌رسانی زنده به کاربر
+                for tool_call in tool_calls:
+                    tool_name = tool_call["function"]["name"]
+                    yield {"type": "status", "content": f"Running tool: {tool_name}..."}
+                    result = self.tools.execute(tool_call)
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.get("id"),
+                        "content": json.dumps(result, ensure_ascii=False),
+                    })
+
+        yield {"type": "token", "content": "\n\n⚠️ Max tool steps reached."}
+
+        
 def main() -> None:
     agent = Agent(
         model="qwen2.5:7b",

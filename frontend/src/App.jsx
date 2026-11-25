@@ -57,6 +57,7 @@ export default function App() {
   const [attachedFile, setAttachedFile] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [statusText, setStatusText] = useState('Thinking...');
 
   // در دسکتاپ پیش‌فرض باز و در موبایل پیش‌فرض بسته است
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 768);
@@ -178,6 +179,7 @@ export default function App() {
     const currentFile = attachedFile;
     const displayContent = textToSend || `Attached file: ${currentFile.filename}`;
 
+    // اضافه کردن پیام کاربر + یک حباب خالی برای دستیار که کلمه‌به‌کلمه پر می‌شود
     setMessages((prev) => [
       ...prev,
       {
@@ -185,18 +187,23 @@ export default function App() {
         content: displayContent,
         file: currentFile?.filename,
       },
+      {
+        role: 'assistant',
+        content: '',
+      },
     ]);
 
     setInput('');
     setAttachedFile(null);
     setIsLoading(true);
+    setStatusText('Thinking...');
 
     const promptForAgent = currentFile
       ? `[Uploaded File Path: "${currentFile.file_path}"]\n${textToSend || 'Please read and summarize this file.'}`
       : textToSend;
 
     try {
-      const res = await fetch(`${API_URL}/chat`, {
+      const res = await fetch(`${API_URL}/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -206,23 +213,52 @@ export default function App() {
           file_name: currentFile?.filename || null,
         }),
       });
-      if (!res.ok) throw new Error('Chat request failed');
-      const data = await res.json();
 
-      setMessages((prev) => [...prev, { role: 'assistant', content: data.reply }]);
+      if (!res.ok) throw new Error('Stream request failed');
 
-      if (!currentSessionId && data.session_id) {
-        setCurrentSessionId(data.session_id);
-        fetchSessions();
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const event = JSON.parse(line.slice(6));
+
+          if (event.type === 'session' && !currentSessionId) {
+            setCurrentSessionId(event.session_id);
+            fetchSessions();
+          } else if (event.type === 'status') {
+            setStatusText(event.content);
+          } else if (event.type === 'token') {
+            setMessages((prev) => {
+              const updated = [...prev];
+              const lastIdx = updated.length - 1;
+              updated[lastIdx] = {
+                ...updated[lastIdx],
+                content: updated[lastIdx].content + event.content,
+              };
+              return updated;
+            });
+          }
+        }
       }
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
+      setMessages((prev) => {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
           role: 'assistant',
           content: '⚠️ Connection error. Please check if the FastAPI backend is running.',
-        },
-      ]);
+        };
+        return updated;
+      });
       console.error(err);
     } finally {
       setIsLoading(false);
@@ -423,6 +459,7 @@ export default function App() {
           ) : (
             <div className="max-w-6xl mx-auto py-4 sm:py-6 space-y-5 sm:space-y-6">
               {messages.map((msg, idx) => {
+                if (msg.role === 'assistant' && !msg.content && isLoading) return null;
                 const isUser = msg.role === 'user';
                 const textDir = getTextDirection(msg.content);
 
@@ -441,7 +478,7 @@ export default function App() {
                       {isUser ? <User className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> : <Bot className="w-3.5 h-3.5 sm:w-4 sm:h-4" />}
                     </div>
 
-                    <div className={`flex flex-col max-w-[85%] sm:max-w-[82%] min-w-0 ${isUser ? 'items-end' : 'items-start'}`}>
+                    <div className={`flex flex-col sm:max-w-[82%] min-w-0 ${isUser ? 'items-end max-w-[85%]' : 'items-start w-full'}`}>
                       <div
                         dir={textDir}
                         className={`w-full rounded-2xl px-3.5 py-2.5 sm:px-4 sm:py-3 text-sm leading-relaxed overflow-hidden ${
@@ -449,7 +486,7 @@ export default function App() {
                         } ${
                           isUser
                             ? 'bg-zinc-800/90 text-zinc-100 border border-zinc-700/70'
-                            : 'bg-zinc-900/70 text-zinc-200 border border-zinc-800/80'
+                            : ''
                         }`}
                       >
                         {msg.file && (
@@ -519,17 +556,7 @@ export default function App() {
                 );
               })}
 
-              {isLoading && (
-                <div className="flex gap-2.5 sm:gap-3.5">
-                  <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-gradient-to-tr from-violet-600 to-indigo-500 flex items-center justify-center shrink-0">
-                    <Bot className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-white" />
-                  </div>
-                  <div className="bg-zinc-900/70 border border-zinc-800/80 rounded-2xl px-3.5 py-2.5 sm:px-4 sm:py-3 flex items-center gap-2.5 text-zinc-400 text-xs">
-                    <Loader2 className="w-4 h-4 animate-spin text-violet-400" />
-                    <span>Thinking & running tools...</span>
-                  </div>
-                </div>
-              )}
+              {isLoading && statusText}
 
               <div ref={messagesEndRef} />
             </div>
@@ -605,7 +632,7 @@ export default function App() {
               </form>
             </div>
             <p className="hidden sm:block text-[11px] text-center text-zinc-600 mt-2">
-              Running locally on your Mac • Press Enter to send, Shift+Enter for new line
+              Running locally on your PC • Press Enter to send, Shift+Enter for new line
             </p>
           </div>
         </footer>

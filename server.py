@@ -5,6 +5,8 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pypdf import PdfReader
+import json
+from fastapi.responses import StreamingResponse
 
 from my_ai import Agent
 import database as db
@@ -117,6 +119,45 @@ def chat_endpoint(req: ChatRequest):
     db.save_message(session_id, "assistant", reply)
 
     return {"reply": reply, "session_id": session_id}
+
+@app.post("/chat/stream")
+def chat_stream_endpoint(req: ChatRequest):
+    session_id = req.session_id
+    user_display = req.display_message or req.message
+
+    if not session_id:
+        session_id = db.create_session(user_display)
+        agent.messages.clear()
+    else:
+        past_messages = db.get_session_messages(session_id)
+        agent.messages = [
+            {"role": m["role"], "content": m["content"]} for m in past_messages
+        ]
+
+    db.save_message(session_id, "user", user_display, req.file_name)
+
+    def event_generator():
+        # ارسال شناسه سشن در همان لحظه اول به فرانت‌اند
+        yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
+
+        full_reply = ""
+        try:
+            for event in agent.chat_stream(req.message):
+                if event["type"] == "token":
+                    full_reply += event["content"]
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            err_msg = f"\n\n⚠️ Error: {str(e)}"
+            full_reply += err_msg
+            yield f"data: {json.dumps({'type': 'token', 'content': err_msg})}\n\n"
+
+        # ذخیره کل پاسخ نهایی در SQLite پس از اتمام استریم
+        if full_reply:
+            db.save_message(session_id, "assistant", full_reply)
+
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/sessions")
 def list_sessions():
